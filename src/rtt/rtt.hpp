@@ -35,21 +35,20 @@ namespace detail {
           sizeof(char const* const) == 4 && sizeof(std::byte* const) == 4,
           "rtt only works on 32bit systems since memory layout is specified for 4byte pointers");
 
-        template<bool write, typename T>
-        std::span<T> transfer(
-          std::span<T> const   userBuffer,
-          std::uint32_t const& readPos,
-          std::uint32_t&       writePos) {
+        template<bool write,
+                 typename T>
+        std::span<T> transfer(std::span<T> const   userBuffer,
+                              std::uint32_t const& readPos,
+                              std::uint32_t&       writePos) {
             static_assert(sizeof(BufferControlBlock) == 24, "layout messed up...");
 
             std::span<T> remainingUserBuffer = userBuffer;
 
             while(!remainingUserBuffer.empty()) {
                 auto calcNumBytesToCopy
-                  = [localReadPosition
-                     = *reinterpret_cast<std::uint32_t const volatile*>(std::addressof(readPos))](
-                      std::uint32_t localWritePos,
-                      std::uint32_t remainingUserBufferSize) {
+                  = [localReadPosition = *reinterpret_cast<std::uint32_t const volatile*>(
+                       std::addressof(readPos))](std::uint32_t localWritePos,
+                                                 std::uint32_t remainingUserBufferSize) {
                         std::uint32_t const noWrapBufferSpace = [&]() {
                             if constexpr(write) {
                                 return localReadPosition > localWritePos
@@ -91,12 +90,10 @@ namespace detail {
                     }
                 }
                 if constexpr(Mode == BufferMode::skip) {
-                    if(
-                      numBytesToCopy
-                        + calcNumBytesToCopy(
-                          calcNewWritePos(writePosition, numBytesToCopy),
-                          remainingUserBuffer.size() - numBytesToCopy)
-                      != remainingUserBuffer.size())
+                    if(numBytesToCopy
+                         + calcNumBytesToCopy(calcNewWritePos(writePosition, numBytesToCopy),
+                                              remainingUserBuffer.size() - numBytesToCopy)
+                       != remainingUserBuffer.size())
                     {
                         break;
                     }
@@ -144,57 +141,52 @@ namespace detail {
         }
     };
 }   // namespace detail
+
 template<typename Config>
 struct ControlBlock {
 private:
     template<typename UpConfig, typename DownConfig>
     struct BufferControlBlocks_impl;
 
-    template<
-      template<typename...>
-      typename U,
-      typename... Us,
-      template<typename...>
-      typename D,
-      typename... Ds>
+    template<template<typename...> typename U,
+             typename... Us,
+             template<typename...> typename D,
+             typename... Ds>
     struct BufferControlBlocks_impl<U<Us...>, D<Ds...>> {
-        using Type = std::tuple<
-          detail::BufferControlBlock<Us::Mode, Us::Size, typename Us::Name>...,
-          detail::BufferControlBlock<Ds::Mode, Ds::Size, typename Ds::Name>...>;
+        using Type
+          = std::tuple<detail::BufferControlBlock<Us::Mode, Us::Size, typename Us::Name>...,
+                       detail::BufferControlBlock<Ds::Mode, Ds::Size, typename Ds::Name>...>;
         static constexpr std::size_t UpSize{sizeof...(Us)};
         static constexpr std::size_t DownSize{sizeof...(Ds)};
     };
 
-    using BufferControlBlocks = BufferControlBlocks_impl<
-      typename Config::UpChannelConfigs,
-      typename Config::DownChannelConfigs>;
+    using BufferControlBlocks = BufferControlBlocks_impl<typename Config::UpChannelConfigs,
+                                                         typename Config::DownChannelConfigs>;
 
     template<typename UpConfig, typename DownConfig>
     struct Storage;
 
-    template<
-      template<typename...>
-      typename U,
-      typename... Us,
-      template<typename...>
-      typename D,
-      typename... Ds>
+    template<template<typename...> typename U,
+             typename... Us,
+             template<typename...> typename D,
+             typename... Ds>
     struct Storage<U<Us...>, D<Ds...>> {
         using Type
           = std::tuple<std::array<std::byte, Us::Size>..., std::array<std::byte, Ds::Size>...>;
     };
 
-    template<typename UserStorage, std::size_t... Is>
+    template<typename UserStorage,
+             std::size_t... Is>
     static constexpr typename BufferControlBlocks::Type
-    bufferControlBlocksInit_impl(UserStorage& buffers, std::index_sequence<Is...>) {
+    bufferControlBlocksInit_impl(UserStorage& buffers,
+                                 std::index_sequence<Is...>) {
         using std::data;
         using std::get;
         using std::size;
-        static_assert(
-          ((size(std::remove_cvref_t<decltype(get<Is>(buffers))>{})
-            == std::tuple_element_t<Is, typename BufferControlBlocks::Type>::BufferSize)
-           && ...),
-          "buffer size does not match");
+        static_assert(((size(std::remove_cvref_t<decltype(get<Is>(buffers))>{})
+                        == std::tuple_element_t<Is, typename BufferControlBlocks::Type>::BufferSize)
+                       && ...),
+                      "buffer size does not match");
         return {
           std::tuple_element_t<Is, typename BufferControlBlocks::Type>{data(get<Is>(buffers))}...};
     }
@@ -215,9 +207,8 @@ private:
     typename BufferControlBlocks::Type bufferControlBlocks;
 
 public:
-    using Storage_t =
-      typename Storage<typename Config::UpChannelConfigs, typename Config::DownChannelConfigs>::
-        Type;
+    using Storage_t = typename Storage<typename Config::UpChannelConfigs,
+                                       typename Config::DownChannelConfigs>::Type;
 
     template<typename UserStorage>
     constexpr explicit ControlBlock(UserStorage& buffers)
@@ -225,13 +216,13 @@ public:
       , numUpBuffers{BufferControlBlocks::UpSize}
       , numDownBuffers{BufferControlBlocks::DownSize}
       , bufferControlBlocks{bufferControlBlocksInit(buffers)} {
-        static_assert(
-          sizeof(ControlBlock)
-            == 24 + (BufferControlBlocks::UpSize + BufferControlBlocks::DownSize) * 24,
-          "layout messed up...");
+        static_assert(sizeof(ControlBlock)
+                        == 24 + (BufferControlBlocks::UpSize + BufferControlBlocks::DownSize) * 24,
+                      "layout messed up...");
     }
 
-    template<std::size_t BufferNumber, std::ranges::contiguous_range InputRange>
+    template<std::size_t                   BufferNumber,
+             std::ranges::contiguous_range InputRange>
         requires std::is_trivially_copyable_v<std::ranges::range_value_t<InputRange>>
     std::span<std::byte const> write(InputRange const& bufferToWrite) {
         static_assert(BufferControlBlocks::UpSize > BufferNumber, "BufferNumber incorrect");
@@ -239,7 +230,8 @@ public:
           .write(std::as_bytes(std::span{bufferToWrite}));
     }
 
-    template<std::size_t BufferNumber, std::ranges::contiguous_range OutputRange>
+    template<std::size_t                   BufferNumber,
+             std::ranges::contiguous_range OutputRange>
         requires std::is_trivially_copyable_v<std::ranges::range_value_t<OutputRange>>
     std::span<std::byte> read(OutputRange&& bufferToReadTo) {
         static_assert(BufferControlBlocks::DownSize > BufferNumber, "BufferNumber incorrect");

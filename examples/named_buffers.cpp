@@ -7,9 +7,9 @@ struct UpName {
 };
 
 struct RttConfig {
-    using UpChannelConfigs = rtt::make_ChannelConfigs_t<
-      rtt::ChannelConfig<64, rtt::BufferMode::skip, UpName>,
-      rtt::ChannelConfig<512, rtt::BufferMode::block, rtt::EmptyName>>;
+    using UpChannelConfigs
+      = rtt::make_ChannelConfigs_t<rtt::ChannelConfig<64, rtt::BufferMode::skip, UpName>,
+                                   rtt::ChannelConfig<512, rtt::BufferMode::block, rtt::EmptyName>>;
 
     using DownChannelConfigs = rtt::EmptyChannelConfig;
 
