@@ -24,12 +24,12 @@ namespace detail {
     struct BufferControlBlock {
     private:
         //memory layout demanded by rtt specification
-        char const* const   name;
-        std::byte* const    buffer;
-        std::uint32_t const bufferSize;
-        std::uint32_t       writePosition;
-        std::uint32_t       readPosition;
-        BufferMode const    mode;
+        char const* const   name{};
+        std::byte* const    buffer{};
+        std::uint32_t const bufferSize{};
+        std::uint32_t       writePosition{};
+        std::uint32_t       readPosition{};
+        BufferMode const    mode{};
 
         static_assert(
           sizeof(char const* const) == 4 && sizeof(std::byte* const) == 4,
@@ -45,25 +45,24 @@ namespace detail {
             std::span<T> remainingUserBuffer = userBuffer;
 
             while(!remainingUserBuffer.empty()) {
-                auto calcNumBytesToCopy
-                  = [localReadPosition = *reinterpret_cast<std::uint32_t const volatile*>(
-                       std::addressof(readPos))](std::uint32_t localWritePos,
-                                                 std::uint32_t remainingUserBufferSize) {
-                        std::uint32_t const noWrapBufferSpace = [&]() {
-                            if constexpr(write) {
-                                return localReadPosition > localWritePos
-                                       ? localReadPosition - localWritePos - 1U
-                                       : BufferSize - (localWritePos - localReadPosition + 1U);
-                            } else {
-                                return localWritePos > localReadPosition
-                                       ? BufferSize - localWritePos
-                                       : localReadPosition - localWritePos;
-                            }
-                        }();
-                        return std::min(
-                          std::min<std::uint32_t>(noWrapBufferSpace, (BufferSize - localWritePos)),
-                          remainingUserBufferSize);
-                    };
+                auto calcNumBytesToCopy =
+                  [localReadPosition = *reinterpret_cast<std::uint32_t const volatile*>(
+                     std::addressof(readPos))](std::uint32_t localWritePos,
+                                               std::uint32_t remainingUserBufferSize) {
+                      std::uint32_t const noWrapBufferSpace = [&]() {
+                          if constexpr(write) {
+                              return localReadPosition > localWritePos
+                                     ? localReadPosition - localWritePos - 1U
+                                     : BufferSize - (localWritePos - localReadPosition + 1U);
+                          } else {
+                              return localWritePos > localReadPosition
+                                     ? BufferSize - localWritePos
+                                     : localReadPosition - localWritePos;
+                          }
+                      }();
+                      return std::min<std::uint32_t>(
+                        {noWrapBufferSpace, (BufferSize - localWritePos), remainingUserBufferSize});
+                  };
 
                 auto calcNewWritePos
                   = [](std::uint32_t localWritePos, std::uint32_t numBytesToCopy) {
@@ -128,8 +127,6 @@ namespace detail {
           : name{std::string_view{Name{}}.data()}
           , buffer{buffer_}
           , bufferSize{BufferSize}
-          , writePosition{}
-          , readPosition{}
           , mode{Mode} {}
 
         std::span<std::byte const> write(std::span<std::byte const> bufferToWrite) {
@@ -236,7 +233,7 @@ public:
     std::span<std::byte> read(OutputRange&& bufferToReadTo) {
         static_assert(BufferControlBlocks::DownSize > BufferNumber, "BufferNumber incorrect");
         return std::get<BufferNumber + BufferControlBlocks::UpSize>(bufferControlBlocks)
-          .read(std::as_writable_bytes(std::span{bufferToReadTo}));
+          .read(std::as_writable_bytes(std::span{std::forward<OutputRange>(bufferToReadTo)}));
     }
 };
 
