@@ -24,8 +24,6 @@ int main() {
     while(true) {
         std::array<std::byte, 16> buffer;
         std::span<std::byte>      readBytes = rttControlBlock.read<0>(buffer);
-        if(!readBytes.empty()) {
-            rttControlBlock.write<0>(readBytes);
-        }
+        if(!readBytes.empty()) { rttControlBlock.write<0>(readBytes); }
     }
 }

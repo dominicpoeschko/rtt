@@ -12,7 +12,5 @@ static inline constinit RttType                     rttControlBlock{storage};
 int main() {
     static constexpr std::string_view msg{"more then bufferSize of the up buffer long\n"};
     std::span<std::byte const>        remaining = rttControlBlock.write<0>(msg);
-    while(!remaining.empty()) {
-        remaining = rttControlBlock.write<0>(remaining);
-    }
+    while(!remaining.empty()) { remaining = rttControlBlock.write<0>(remaining); }
 }

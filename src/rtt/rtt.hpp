@@ -71,9 +71,7 @@ namespace detail {
                             return (localWritePos + numBytesToCopy) % BufferSize;
                         } else {
                             std::uint32_t const newWritePos = localWritePos + numBytesToCopy;
-                            if(newWritePos == BufferSize) {
-                                return 0U;
-                            }
+                            if(newWritePos == BufferSize) { return 0U; }
                             return newWritePos;
                         }
                     };
