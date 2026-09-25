@@ -1,0 +1,12 @@
+# The standard library's random engines (mt19937 seeding and generation) rely on well-defined
+# unsigned wraparound. Clang's "integer" sanitizer group flags such arithmetic even though it is
+# not UB, so exempt the standard library headers from exactly those checks. rtt.hpp and the tests
+# keep every check.
+[unsigned-integer-overflow]
+src:*/include/c++/*
+[unsigned-shift-base]
+src:*/include/c++/*
+[implicit-integer-truncation]
+src:*/include/c++/*
+[implicit-integer-sign-change]
+src:*/include/c++/*

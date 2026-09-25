@@ -47,6 +47,9 @@ namespace detail {
         template<bool write>
         static Space space(std::size_t const otherPos,
                            std::size_t const pos) {
+            // the host's offset past the buffer (corrupt, or a probe reading garbage): touch nothing
+            // rather than copy past the storage's end
+            if(otherPos >= BufferSize) { return {0U, 0U}; }
             if constexpr(write) {
                 if(otherPos > pos) { return {otherPos - pos - 1U, otherPos - pos - 1U}; }
                 std::size_t const total = BufferSize - 1U - (pos - otherPos);
@@ -69,10 +72,11 @@ namespace detail {
         }
 
         // the data before the offset that publishes it: SEGGER_RTT.h puts a DMB there (RTT__DMB) on
-        // the cores that may reorder memory accesses - ARMv7E-M, ARMv8-M baseline and mainline
+        // the cores that may reorder memory accesses - ARMv7E-M, ARMv8-M baseline and mainline,
+        // ARMv7-A/R
         static void publishFence() {
 #if defined(__ARM_ARCH_7EM__) || defined(__ARM_ARCH_8M_BASE__) || defined(__ARM_ARCH_8M_MAIN__) \
-  || defined(__ARM_ARCH_8_1M_MAIN__)
+  || defined(__ARM_ARCH_8_1M_MAIN__) || defined(__ARM_ARCH_7A__) || defined(__ARM_ARCH_7R__)
             asm volatile("dmb" ::: "memory");
 #else
             std::atomic_signal_fence(std::memory_order_seq_cst);
@@ -127,7 +131,7 @@ namespace detail {
             if constexpr(write) {
                 return remaining;
             } else {
-                return std::span<T>{userBuffer.begin(), remaining.begin()};
+                return userBuffer.first(userBuffer.size() - remaining.size());
             }
         }
 

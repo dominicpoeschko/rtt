@@ -1,0 +1,86 @@
+name: CI
+
+on:
+    workflow_dispatch:
+    push:
+        branches:
+            - master
+    pull_request:
+        branches:
+            - master
+
+jobs:
+    # The ring, the control block layout and the examples, on the host. rtt compiles for 4-byte
+    # pointers only, so everything is built -m32: no libc++ entries, Arch has no 32-bit libc++.
+    # Release is the default build type and defines NDEBUG; the Debug entry keeps the asserts.
+    build-and-test:
+        runs-on: ubuntu-latest
+        container:
+            image: archlinux:latest
+        strategy:
+            fail-fast: false
+            matrix:
+                compiler:
+                    - {cc: gcc, cxx: g++}
+                    - {cc: gcc, cxx: g++, stdlib_debug: true, sanitizer: address}
+                    - {cc: gcc, cxx: g++, build_type: Debug, stdlib_debug: true, sanitizer: address}
+                    - {cc: clang, cxx: clang++}
+                    - {cc: clang, cxx: clang++, sanitizer: address}
+
+        steps:
+            - name: Set up C++ environment
+              # multilib: the 32-bit glibc and libgcc (and their sanitizer runtimes) for -m32
+              run: |
+                sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
+                pacman -Syu --noconfirm --disable-download-timeout
+                pacman -S --noconfirm --disable-download-timeout git cmake ninja base-devel lib32-glibc lib32-gcc-libs ${{ matrix.compiler.cc == 'clang' && 'clang compiler-rt' || '' }}
+
+            - name: Checkout repository
+              uses: actions/checkout@v5
+
+            - name: Configure CMake
+              run: >
+                cmake -S tests -B build -G Ninja
+                -DUSE_FORCE_FETCH=ON
+                ${{ matrix.compiler.build_type && format('-DCMAKE_BUILD_TYPE={0}', matrix.compiler.build_type) || '' }}
+                ${{ matrix.compiler.sanitizer && format('-DUSE_SANITIZER={0}', matrix.compiler.sanitizer) || '' }}
+                ${{ matrix.compiler.stdlib_debug && '-DUSE_STDLIB_DEBUG=true' || '' }}
+              env:
+                CC: ${{ matrix.compiler.cc }}
+                CXX: ${{ matrix.compiler.cxx }}
+
+            # -m32 must have been found, or the job would pass with no host test at all
+            - name: Check the host tests are configured
+              run: grep -q '^RTT_HAS_M32:INTERNAL=1' build/CMakeCache.txt
+
+            - name: Build project
+              run: cmake --build build -j"$(nproc)"
+
+            - name: Run tests
+              run: cd build && ctest --output-on-failure -E '^rtt_arm_'
+
+    # The target side: an example cross-compiled for M0+ to M55 and A7/R5 with gcc and clang,
+    # warnings as errors, and the dmb in front of every published offset where the core needs one.
+    arm:
+        runs-on: ubuntu-latest
+        container:
+            image: archlinux:latest
+
+        steps:
+            - name: Set up C++ environment
+              run: |
+                pacman -Syu --noconfirm --disable-download-timeout
+                pacman -S --noconfirm --disable-download-timeout git cmake ninja base-devel clang arm-none-eabi-gcc arm-none-eabi-newlib
+
+            - name: Checkout repository
+              uses: actions/checkout@v5
+
+            - name: Configure CMake
+              run: cmake -S tests -B build -G Ninja -DUSE_FORCE_FETCH=ON
+
+            # 9 cores x 2 compilers; fewer means a compiler was not found
+            - name: Run ARM checks
+              run: |
+                cd build
+                test "$(ctest -N -R '^rtt_arm_' | grep -c 'Test *#')" -eq 18
+                ctest --output-on-failure -R '^rtt_arm_'

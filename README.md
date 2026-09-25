@@ -57,6 +57,21 @@ example:
 [[gnu::section(".noInit")]] static inline constinit typename RttType::Storage_t rttStorage;
 ```
 
+## Tests
+`tests/` is a CMake project of its own, run by CI on every push:
+
+```sh
+cmake -S tests -B build && cmake --build build && ctest --test-dir build
+```
+
+- the ring against a model, its edges, block mode against a reader thread, and host offsets
+  past the buffer (the target must never copy outside it), built `-m32` since rtt needs
+  4-byte pointers (`-DUSE_SANITIZER=address` for ASan/UBSan)
+- the examples: all compiled, the ones that end run
+- with `arm-none-eabi-gcc` installed: an example cross-compiled with gcc and clang for
+  Cortex-M0+ to M55 and A7/R5, warnings as errors, and a `dmb` checked in the assembly
+  exactly where the core needs one
+
 ## Contribution
 Feel free to report bugs or submit pull requests.
 
@@ -68,8 +83,10 @@ Feel free to report bugs or submit pull requests.
   There is no reason, other then performace, to not support non contigues ranges.
   When there is a need for that, feel free to suggest an option how to configure it.
 
-## TODO
-- For Cortex-M7/M23/M33/A/R: There is a data memory barrier missing.
+- A `dmb` is placed between the data and the offset that publishes it on
+  ARMv7E-M (Cortex-M4/M7), ARMv8-M baseline/mainline (Cortex-M23/M33), ARMv8.1-M
+  and ARMv7-A/R (Cortex-A/R), as `SEGGER_RTT.h` does. Cortex-M0/M0+/M3 get only a
+  compiler barrier; SEGGER adds no `dmb` there either.
     
 [^1]: The control blocks will be inizialised in startup code while copying the data segment.
       There will be `24 + <number of buffers> * 24` bytes copied.

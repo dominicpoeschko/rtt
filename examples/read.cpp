@@ -9,7 +9,7 @@ struct RttConfig {
     using UpChannelConfigs = rtt::make_ChannelConfigs_t<rtt::ChannelConfig<64>>;
 
     using DownChannelConfigs
-      = rtt::make_ChannelConfigs_t<rtt::ChannelConfig<64>, rtt::BufferMode::trim>;
+      = rtt::make_ChannelConfigs_t<rtt::ChannelConfig<64, rtt::BufferMode::trim>>;
 
     static constexpr auto ControlBlockId{rtt::DefaultControlBlockId};
 };
