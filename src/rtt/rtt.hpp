@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -20,119 +21,140 @@ namespace rtt {
 enum class BufferMode : std::uint32_t { skip = 0, trim = 1, block = 2 };
 
 namespace detail {
-    template<BufferMode Mode, std::size_t BufferSize_, typename Name>
+    //memory layout demanded by rtt specification
     struct BufferControlBlock {
-    private:
-        //memory layout demanded by rtt specification
         char const* const   name{};
         std::byte* const    buffer{};
         std::uint32_t const bufferSize{};
         std::uint32_t       writePosition{};
         std::uint32_t       readPosition{};
         BufferMode const    mode{};
+    };
 
+    template<BufferMode Mode, std::size_t BufferSize_, typename Name>
+    struct Buffer {
+    private:
         static_assert(
-          sizeof(char const* const) == 4 && sizeof(std::byte* const) == 4,
+          sizeof(char const*) == 4 && sizeof(std::byte*) == 4,
           "rtt only works on 32bit systems since memory layout is specified for 4byte pointers");
+
+        struct Space {
+            std::size_t contiguous;   // up to the buffer's end
+            std::size_t total;
+        };
+
+        // free bytes to write at `pos`, or filled bytes to read there
+        template<bool write>
+        static Space space(std::size_t const otherPos,
+                           std::size_t const pos) {
+            if constexpr(write) {
+                if(otherPos > pos) { return {otherPos - pos - 1U, otherPos - pos - 1U}; }
+                std::size_t const total = BufferSize - 1U - (pos - otherPos);
+                return {std::min(total, BufferSize - pos), total};
+            } else {
+                if(pos > otherPos) { return {BufferSize - pos, BufferSize - pos + otherPos}; }
+                return {otherPos - pos, otherPos - pos};
+            }
+        }
+
+        static std::uint32_t nextPos(std::uint32_t const pos,
+                                     std::size_t const   numBytes) {
+            // no division: % only where it is a mask (a power of two), a compare otherwise
+            if constexpr(std::has_single_bit(BufferSize)) {
+                return static_cast<std::uint32_t>((pos + numBytes) % BufferSize);
+            } else {
+                auto const newPos = static_cast<std::uint32_t>(pos + numBytes);
+                return newPos == BufferSize ? 0U : newPos;
+            }
+        }
+
+        // the data before the offset that publishes it: SEGGER_RTT.h puts a DMB there (RTT__DMB) on
+        // the cores that may reorder memory accesses - ARMv7E-M, ARMv8-M baseline and mainline
+        static void publishFence() {
+#if defined(__ARM_ARCH_7EM__) || defined(__ARM_ARCH_8M_BASE__) || defined(__ARM_ARCH_8M_MAIN__) \
+  || defined(__ARM_ARCH_8_1M_MAIN__)
+            asm volatile("dmb" ::: "memory");
+#else
+            std::atomic_signal_fence(std::memory_order_seq_cst);
+#endif
+        }
 
         template<bool write,
                  typename T>
-        std::span<T> transfer(std::span<T> const   userBuffer,
-                              std::uint32_t const& readPos,
-                              std::uint32_t&       writePos) {
-            static_assert(sizeof(BufferControlBlock) == 24, "layout messed up...");
+        static std::span<T> transfer(std::byte* const     buffer,
+                                     std::span<T> const   userBuffer,
+                                     std::uint32_t const& otherPosition,
+                                     std::uint32_t&       ownPosition) {
+            std::span<T>  remaining = userBuffer;
+            std::uint32_t pos       = ownPosition;
 
-            std::span<T> remainingUserBuffer = userBuffer;
+            while(!remaining.empty()) {
+                Space const free = space<write>(
+                  *reinterpret_cast<std::uint32_t const volatile*>(std::addressof(otherPosition)),
+                  pos);
 
-            while(!remainingUserBuffer.empty()) {
-                auto calcNumBytesToCopy =
-                  [localReadPosition = *reinterpret_cast<std::uint32_t const volatile*>(
-                     std::addressof(readPos))](std::uint32_t localWritePos,
-                                               std::uint32_t remainingUserBufferSize) {
-                      std::uint32_t const noWrapBufferSpace = [&]() {
-                          if constexpr(write) {
-                              return localReadPosition > localWritePos
-                                     ? localReadPosition - localWritePos - 1U
-                                     : BufferSize - (localWritePos - localReadPosition + 1U);
-                          } else {
-                              return localWritePos > localReadPosition
-                                     ? BufferSize - localWritePos
-                                     : localReadPosition - localWritePos;
-                          }
-                      }();
-                      return std::min<std::uint32_t>(
-                        {noWrapBufferSpace, (BufferSize - localWritePos), remainingUserBufferSize});
-                  };
-
-                auto calcNewWritePos
-                  = [](std::uint32_t localWritePos, std::uint32_t numBytesToCopy) {
-                        //unfortunately, this really makes a difference in the generated code...
-                        if constexpr(std::has_single_bit(BufferSize)) {
-                            return (localWritePos + numBytesToCopy) % BufferSize;
-                        } else {
-                            std::uint32_t const newWritePos = localWritePos + numBytesToCopy;
-                            if(newWritePos == BufferSize) { return 0U; }
-                            return newWritePos;
-                        }
-                    };
-
-                std::uint32_t const numBytesToCopy
-                  = calcNumBytesToCopy(writePos, remainingUserBuffer.size());
-
-                if(numBytesToCopy == 0) {
+                // skip: a write goes in whole or not at all; a read takes what is there
+                if constexpr(write && Mode == BufferMode::skip) {
+                    if(free.total < remaining.size()) { break; }
+                }
+                if(free.total == 0) {
                     if constexpr(Mode != BufferMode::block) {
                         break;
                     } else {
                         continue;
                     }
                 }
-                if constexpr(Mode == BufferMode::skip) {
-                    if(numBytesToCopy
-                         + calcNumBytesToCopy(calcNewWritePos(writePosition, numBytesToCopy),
-                                              remainingUserBuffer.size() - numBytesToCopy)
-                       != remainingUserBuffer.size())
-                    {
-                        break;
-                    }
-                }
 
-                if constexpr(write) {
-                    std::memcpy(
-                      std::next(buffer, static_cast<std::make_signed_t<std::size_t>>(writePos)),
-                      remainingUserBuffer.data(),
-                      numBytesToCopy);
-                } else {
-                    std::memcpy(
-                      remainingUserBuffer.data(),
-                      std::next(buffer, static_cast<std::make_signed_t<std::size_t>>(writePos)),
-                      numBytesToCopy);
+                // at most two pieces: up to the buffer's end, then from its start
+                std::size_t left  = std::min(free.total, remaining.size());
+                std::size_t piece = std::min(free.contiguous, left);
+                while(piece != 0) {
+                    auto* const ring
+                      = std::next(buffer, static_cast<std::make_signed_t<std::size_t>>(pos));
+                    if constexpr(write) {
+                        std::memcpy(ring, remaining.data(), piece);
+                    } else {
+                        std::memcpy(remaining.data(), ring, piece);
+                    }
+                    remaining = remaining.subspan(piece);
+                    pos       = nextPos(pos, piece);
+                    left -= piece;
+                    piece = left;
                 }
-                //TODO add data memory barrier asm("dmb")
-                remainingUserBuffer = remainingUserBuffer.subspan(numBytesToCopy);
-                writePos            = calcNewWritePos(writePos, numBytesToCopy);
+                publishFence();
+                ownPosition = pos;
             }
             if constexpr(write) {
-                return remainingUserBuffer;
+                return remaining;
             } else {
-                return std::span<T>{userBuffer.begin(), remainingUserBuffer.begin()};
+                return std::span<T>{userBuffer.begin(), remaining.begin()};
             }
         }
 
     public:
         static constexpr auto BufferSize = BufferSize_;
 
-        constexpr explicit BufferControlBlock(std::byte* const buffer_)
-          : name{std::string_view{Name{}}.data()}
-          , buffer{buffer_}
-          , bufferSize{BufferSize}
-          , mode{Mode} {}
-
-        std::span<std::byte const> write(std::span<std::byte const> bufferToWrite) {
-            return transfer<true>(bufferToWrite, readPosition, writePosition);
+        static constexpr BufferControlBlock make(std::byte* const buffer) {
+            return {.name       = std::string_view{Name{}}.data(),
+                    .buffer     = buffer,
+                    .bufferSize = BufferSize,
+                    .mode       = Mode};
         }
 
-        std::span<std::byte> read(std::span<std::byte> bufferToReadTo) {
-            return transfer<false>(bufferToReadTo, writePosition, readPosition);
+        static std::span<std::byte const> write(BufferControlBlock&        block,
+                                                std::span<std::byte const> bufferToWrite) {
+            return transfer<true>(block.buffer,
+                                  bufferToWrite,
+                                  block.readPosition,
+                                  block.writePosition);
+        }
+
+        static std::span<std::byte> read(BufferControlBlock&  block,
+                                         std::span<std::byte> bufferToReadTo) {
+            return transfer<false>(block.buffer,
+                                   bufferToReadTo,
+                                   block.writePosition,
+                                   block.readPosition);
         }
     };
 }   // namespace detail
@@ -141,22 +163,32 @@ template<typename Config>
 struct ControlBlock {
 private:
     template<typename UpConfig, typename DownConfig>
-    struct BufferControlBlocks_impl;
+    struct Buffers_impl;
 
     template<template<typename...> typename U,
              typename... Us,
              template<typename...> typename D,
              typename... Ds>
-    struct BufferControlBlocks_impl<U<Us...>, D<Ds...>> {
-        using Type
-          = std::tuple<detail::BufferControlBlock<Us::Mode, Us::Size, typename Us::Name>...,
-                       detail::BufferControlBlock<Ds::Mode, Ds::Size, typename Ds::Name>...>;
+    struct Buffers_impl<U<Us...>, D<Ds...>> {
+        using Types = std::tuple<detail::Buffer<Us::Mode, Us::Size, typename Us::Name>...,
+                                 detail::Buffer<Ds::Mode, Ds::Size, typename Ds::Name>...>;
         static constexpr std::size_t UpSize{sizeof...(Us)};
         static constexpr std::size_t DownSize{sizeof...(Ds)};
     };
 
-    using BufferControlBlocks = BufferControlBlocks_impl<typename Config::UpChannelConfigs,
-                                                         typename Config::DownChannelConfigs>;
+    using Buffers
+      = Buffers_impl<typename Config::UpChannelConfigs, typename Config::DownChannelConfigs>;
+
+    template<std::size_t I>
+    using BufferAt = std::tuple_element_t<I, typename Buffers::Types>;
+
+    static constexpr std::size_t NumBuffers = Buffers::UpSize + Buffers::DownSize;
+
+    // std::array<T, 0> is not empty in libc++
+    struct NoBuffers {};
+
+    using BufferControlBlocks = std::
+      conditional_t<NumBuffers == 0, NoBuffers, std::array<detail::BufferControlBlock, NumBuffers>>;
 
     template<typename UpConfig, typename DownConfig>
     struct Storage;
@@ -172,34 +204,23 @@ private:
 
     template<typename UserStorage,
              std::size_t... Is>
-    static constexpr typename BufferControlBlocks::Type
-    bufferControlBlocksInit_impl(UserStorage& buffers,
-                                 std::index_sequence<Is...>) {
+    static constexpr BufferControlBlocks bufferControlBlocksInit(UserStorage& buffers,
+                                                                 std::index_sequence<Is...>) {
         using std::data;
         using std::get;
         using std::size;
-        static_assert(((size(std::remove_cvref_t<decltype(get<Is>(buffers))>{})
-                        == std::tuple_element_t<Is, typename BufferControlBlocks::Type>::BufferSize)
-                       && ...),
-                      "buffer size does not match");
-        return {
-          std::tuple_element_t<Is, typename BufferControlBlocks::Type>{data(get<Is>(buffers))}...};
-    }
-
-    template<typename UserStorage>
-    static constexpr typename BufferControlBlocks::Type
-    bufferControlBlocksInit(UserStorage& buffers) {
-        return bufferControlBlocksInit_impl(
-          buffers,
-          std::make_index_sequence<BufferControlBlocks::UpSize + BufferControlBlocks::DownSize>{});
+        static_assert(
+          ((size(std::remove_cvref_t<decltype(get<Is>(buffers))>{}) == BufferAt<Is>::BufferSize)
+           && ...),
+          "buffer size does not match");
+        return {BufferAt<Is>::make(data(get<Is>(buffers)))...};
     }
 
     //memory layout demanded by rtt specification
-    std::array<char, 16> const controlBlockId;
-    std::uint32_t const        numUpBuffers;
-    std::uint32_t const        numDownBuffers;
-    [[no_unique_address]]   //for the strange case when there are 0 up and 0 down buffers...
-    typename BufferControlBlocks::Type bufferControlBlocks;
+    std::array<char, 16> const                controlBlockId;
+    std::uint32_t const                       numUpBuffers;
+    std::uint32_t const                       numDownBuffers;
+    [[no_unique_address]] BufferControlBlocks bufferControlBlocks;
 
 public:
     using Storage_t = typename Storage<typename Config::UpChannelConfigs,
@@ -208,30 +229,32 @@ public:
     template<typename UserStorage>
     constexpr explicit ControlBlock(UserStorage& buffers)
       : controlBlockId{Config::ControlBlockId}
-      , numUpBuffers{BufferControlBlocks::UpSize}
-      , numDownBuffers{BufferControlBlocks::DownSize}
-      , bufferControlBlocks{bufferControlBlocksInit(buffers)} {
-        static_assert(sizeof(ControlBlock)
-                        == 24 + (BufferControlBlocks::UpSize + BufferControlBlocks::DownSize) * 24,
-                      "layout messed up...");
+      , numUpBuffers{Buffers::UpSize}
+      , numDownBuffers{Buffers::DownSize}
+      , bufferControlBlocks{bufferControlBlocksInit(buffers,
+                                                    std::make_index_sequence<NumBuffers>{})} {
+        static_assert(sizeof(detail::BufferControlBlock) == 24, "layout messed up...");
+        static_assert(sizeof(ControlBlock) == 24 + NumBuffers * 24, "layout messed up...");
     }
 
     template<std::size_t                   BufferNumber,
              std::ranges::contiguous_range InputRange>
         requires std::is_trivially_copyable_v<std::ranges::range_value_t<InputRange>>
     std::span<std::byte const> write(InputRange const& bufferToWrite) {
-        static_assert(BufferControlBlocks::UpSize > BufferNumber, "BufferNumber incorrect");
-        return std::get<BufferNumber>(bufferControlBlocks)
-          .write(std::as_bytes(std::span{bufferToWrite}));
+        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
+        return BufferAt<BufferNumber>::write(std::get<BufferNumber>(bufferControlBlocks),
+                                             std::as_bytes(std::span{bufferToWrite}));
     }
 
     template<std::size_t                   BufferNumber,
              std::ranges::contiguous_range OutputRange>
         requires std::is_trivially_copyable_v<std::ranges::range_value_t<OutputRange>>
     std::span<std::byte> read(OutputRange&& bufferToReadTo) {
-        static_assert(BufferControlBlocks::DownSize > BufferNumber, "BufferNumber incorrect");
-        return std::get<BufferNumber + BufferControlBlocks::UpSize>(bufferControlBlocks)
-          .read(std::as_writable_bytes(std::span{std::forward<OutputRange>(bufferToReadTo)}));
+        static_assert(Buffers::DownSize > BufferNumber, "BufferNumber incorrect");
+        constexpr std::size_t Index = BufferNumber + Buffers::UpSize;
+        return BufferAt<Index>::read(
+          std::get<Index>(bufferControlBlocks),
+          std::as_writable_bytes(std::span{std::forward<OutputRange>(bufferToReadTo)}));
     }
 };
 
