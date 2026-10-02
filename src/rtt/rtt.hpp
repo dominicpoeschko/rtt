@@ -83,12 +83,13 @@ namespace detail {
 #endif
         }
 
+        // the number of elements of userBuffer moved (from its start)
         template<bool write,
                  typename T>
-        static std::span<T> transfer(std::byte* const     buffer,
-                                     std::span<T> const   userBuffer,
-                                     std::uint32_t const& otherPosition,
-                                     std::uint32_t&       ownPosition) {
+        static std::size_t transfer(std::byte* const     buffer,
+                                    std::span<T> const   userBuffer,
+                                    std::uint32_t const& otherPosition,
+                                    std::uint32_t&       ownPosition) {
             std::span<T>  remaining = userBuffer;
             std::uint32_t pos       = ownPosition;
 
@@ -128,11 +129,7 @@ namespace detail {
                 publishFence();
                 ownPosition = pos;
             }
-            if constexpr(write) {
-                return remaining;
-            } else {
-                return userBuffer.first(userBuffer.size() - remaining.size());
-            }
+            return userBuffer.size() - remaining.size();
         }
 
     public:
@@ -147,18 +144,16 @@ namespace detail {
 
         static std::span<std::byte const> write(BufferControlBlock&        block,
                                                 std::span<std::byte const> bufferToWrite) {
-            return transfer<true>(block.buffer,
-                                  bufferToWrite,
-                                  block.readPosition,
-                                  block.writePosition);
+            return bufferToWrite.subspan(
+              transfer<true>(block.buffer, bufferToWrite, block.readPosition, block.writePosition));
         }
 
         static std::span<std::byte> read(BufferControlBlock&  block,
                                          std::span<std::byte> bufferToReadTo) {
-            return transfer<false>(block.buffer,
-                                   bufferToReadTo,
-                                   block.writePosition,
-                                   block.readPosition);
+            return bufferToReadTo.first(transfer<false>(block.buffer,
+                                                        bufferToReadTo,
+                                                        block.writePosition,
+                                                        block.readPosition));
         }
     };
 }   // namespace detail

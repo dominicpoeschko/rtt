@@ -42,6 +42,7 @@ jobs:
               run: >
                 cmake -S tests -B build -G Ninja
                 -DUSE_FORCE_FETCH=ON
+                -DUSE_WARNINGS_AS_ERRORS=ON
                 ${{ matrix.compiler.build_type && format('-DCMAKE_BUILD_TYPE={0}', matrix.compiler.build_type) || '' }}
                 ${{ matrix.compiler.sanitizer && format('-DUSE_SANITIZER={0}', matrix.compiler.sanitizer) || '' }}
                 ${{ matrix.compiler.stdlib_debug && '-DUSE_STDLIB_DEBUG=true' || '' }}
@@ -76,7 +77,7 @@ jobs:
               uses: actions/checkout@v5
 
             - name: Configure CMake
-              run: cmake -S tests -B build -G Ninja -DUSE_FORCE_FETCH=ON
+              run: cmake -S tests -B build -G Ninja -DUSE_FORCE_FETCH=ON -DUSE_WARNINGS_AS_ERRORS=ON
 
             # 9 cores x 2 compilers; fewer means a compiler was not found
             - name: Run ARM checks
