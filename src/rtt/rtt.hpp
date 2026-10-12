@@ -31,6 +31,11 @@ namespace detail {
         BufferMode const    mode{};
     };
 
+    // never waits: write()'s waiter, which keeps its code as it was
+    struct NeverWait {
+        constexpr bool operator()(std::uint32_t) const { return false; }
+    };
+
     template<BufferMode Mode, std::size_t BufferSize_, typename Name>
     struct Buffer {
     private:
@@ -83,24 +88,33 @@ namespace detail {
 #endif
         }
 
-        // the number of elements of userBuffer moved (from its start)
+        // the number of elements of userBuffer moved (from its start). A skip-mode write that does
+        // not fit asks keepWaiting(the host's offset) and tries again while it says yes. Publish:
+        // ownPosition is the offset the other side reads (a fence before it moves); false for a
+        // staged write, whose position is the writer's own until publish().
         template<bool write,
-                 typename T>
+                 typename T,
+                 typename KeepWaiting = NeverWait,
+                 bool Publish         = true>
         static std::size_t transfer(std::byte* const     buffer,
                                     std::span<T> const   userBuffer,
                                     std::uint32_t const& otherPosition,
-                                    std::uint32_t&       ownPosition) {
+                                    std::uint32_t&       ownPosition,
+                                    KeepWaiting&&        keepWaiting = {}) {
             std::span<T>  remaining = userBuffer;
             std::uint32_t pos       = ownPosition;
 
             while(!remaining.empty()) {
-                Space const free = space<write>(
-                  *reinterpret_cast<std::uint32_t const volatile*>(std::addressof(otherPosition)),
-                  pos);
+                std::uint32_t const other
+                  = *reinterpret_cast<std::uint32_t const volatile*>(std::addressof(otherPosition));
+                Space const free = space<write>(other, pos);
 
                 // skip: a write goes in whole or not at all; a read takes what is there
                 if constexpr(write && Mode == BufferMode::skip) {
-                    if(free.total < remaining.size()) { break; }
+                    if(free.total < remaining.size()) {
+                        if(!keepWaiting(other)) { break; }
+                        continue;
+                    }
                 }
                 if(free.total == 0) {
                     if constexpr(Mode != BufferMode::block) {
@@ -126,7 +140,7 @@ namespace detail {
                     left -= piece;
                     piece = left;
                 }
-                publishFence();
+                if constexpr(Publish) { publishFence(); }
                 ownPosition = pos;
             }
             return userBuffer.size() - remaining.size();
@@ -146,6 +160,41 @@ namespace detail {
                                                 std::span<std::byte const> bufferToWrite) {
             return bufferToWrite.subspan(
               transfer<true>(block.buffer, bufferToWrite, block.readPosition, block.writePosition));
+        }
+
+        // A write the host does not see yet: at `staged` (the published write offset or past it),
+        // all or nothing, `staged` moved past it; publish() makes everything up to `staged` visible
+        // at once. A whole record written this way never shows with a hole in it. A write that does
+        // not fit asks keepWaiting(the host's read offset) and tries again while it says yes.
+        template<typename KeepWaiting = NeverWait>
+            requires(Mode == BufferMode::skip)
+        static bool stage(BufferControlBlock&        block,
+                          std::span<std::byte const> bufferToWrite,
+                          std::uint32_t&             staged,
+                          KeepWaiting&&              keepWaiting = {}) {
+            if(staged >= BufferSize) { return false; }
+            return transfer<true, std::byte const, KeepWaiting, false>(
+                     block.buffer,
+                     bufferToWrite,
+                     block.readPosition,
+                     staged,
+                     std::forward<KeepWaiting>(keepWaiting))
+                == bufferToWrite.size();
+        }
+
+        static void publish(BufferControlBlock& block,
+                            std::uint32_t const staged) {
+            publishFence();
+            block.writePosition = staged;
+        }
+
+        // bytes written that the host has not read yet (0 for a host offset out of range)
+        static std::size_t unread(BufferControlBlock const& block) {
+            std::size_t const host = *reinterpret_cast<std::uint32_t const volatile*>(
+              std::addressof(block.readPosition));
+            if(host >= BufferSize) { return 0U; }
+            std::size_t const own = block.writePosition;
+            return own >= host ? own - host : BufferSize - host + own;
         }
 
         static std::span<std::byte> read(BufferControlBlock&  block,
@@ -243,6 +292,47 @@ public:
         static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
         return BufferAt<BufferNumber>::write(std::get<BufferNumber>(bufferControlBlocks),
                                              std::as_bytes(std::span{bufferToWrite}));
+    }
+
+    // A staged write to up buffer BufferNumber (a skip-mode buffer): see detail::Buffer::stage.
+    template<std::size_t BufferNumber,
+             typename KeepWaiting = detail::NeverWait>
+    bool stage(std::span<std::byte const> bufferToWrite,
+               std::uint32_t&             staged,
+               KeepWaiting&&              keepWaiting = {}) {
+        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
+        return BufferAt<BufferNumber>::stage(std::get<BufferNumber>(bufferControlBlocks),
+                                             bufferToWrite,
+                                             staged,
+                                             std::forward<KeepWaiting>(keepWaiting));
+    }
+
+    template<std::size_t BufferNumber>
+    void publish(std::uint32_t staged) {
+        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
+        BufferAt<BufferNumber>::publish(std::get<BufferNumber>(bufferControlBlocks), staged);
+    }
+
+    // the published write offset of up buffer BufferNumber (where a staged record starts)
+    template<std::size_t BufferNumber>
+    std::uint32_t writeOffset() const {
+        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
+        return std::get<BufferNumber>(bufferControlBlocks).writePosition;
+    }
+
+    // bytes of up buffer BufferNumber the host has not read yet
+    template<std::size_t BufferNumber>
+    std::size_t unread() const {
+        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
+        return BufferAt<BufferNumber>::unread(std::get<BufferNumber>(bufferControlBlocks));
+    }
+
+    // the host's read offset of up buffer BufferNumber, as it is now
+    template<std::size_t BufferNumber>
+    std::uint32_t hostOffset() const {
+        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
+        return *reinterpret_cast<std::uint32_t const volatile*>(
+          std::addressof(std::get<BufferNumber>(bufferControlBlocks).readPosition));
     }
 
     template<std::size_t                   BufferNumber,

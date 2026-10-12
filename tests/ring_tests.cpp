@@ -333,6 +333,49 @@ void controlBlockLayout() {
     CHECK(word(&block, 24 + 24 * 4 + 16) == 2, "read<1> moves down1's RdOff");
 }
 
+// stage(): written past the published offset, invisible to the reader until publish(); all or nothing; a waiter
+// asked only when it does not fit. unread() and the waiter's host offset.
+template<std::size_t Size>
+void staged(char const* what) {
+    using Buffer       = BufferT<rtt::BufferMode::skip, Size>;
+    auto          ring = Ring<rtt::BufferMode::skip, Size>{};
+    std::uint32_t at   = ring.block.writePosition;
+    CHECK(Buffer::stage(ring.block, bytes<4>(0), at), what);
+    CHECK(Buffer::stage(ring.block, bytes<3>(4), at), what);
+    CHECK(ring.block.writePosition == 0 && Buffer::unread(ring.block) == 0,
+          "staged bytes are not published");
+    std::array<std::byte, Size> out{};
+    CHECK(Buffer::read(ring.block, out).empty(), "the reader sees nothing before publish()");
+    Buffer::publish(ring.block, at);
+    CHECK(Buffer::unread(ring.block) == 7, "publish() makes the record visible at once");
+    auto const got = Buffer::read(ring.block, out);
+    CHECK(got.size() == 7 && got[6] == byteOf(6), "and it reads back whole");
+
+    // Size - 1 bytes of room; a stage that does not fit moves nothing and asks the waiter with the host's offset
+    at                   = ring.block.writePosition;
+    std::size_t   asked  = 0;
+    std::uint32_t seen   = 0xFFFF'FFFFU;
+    auto const    waiter = [&](std::uint32_t host) {
+        ++asked;
+        seen = host;
+        return false;
+    };
+    std::vector<std::byte> tooBig(Size, std::byte{1});
+    CHECK(!Buffer::stage(ring.block, tooBig, at, waiter), "a record over the room is refused");
+    CHECK(at == ring.block.writePosition, "and moves nothing");
+    CHECK(asked == 1 && seen == ring.block.readPosition,
+          "the waiter is asked once, with the host's read offset");
+    asked = 0;
+    CHECK(Buffer::stage(ring.block, bytes<2>(0), at, waiter) && asked == 0,
+          "a fitting piece never asks");
+
+    ring.block.readPosition = static_cast<std::uint32_t>(Size + 5);   // a corrupt host offset
+    CHECK(Buffer::unread(ring.block) == 0, "unread() of a corrupt host offset is 0");
+    std::uint32_t corrupt = static_cast<std::uint32_t>(Size + 1);
+    CHECK(!Buffer::stage(ring.block, bytes<1>(0), corrupt),
+          "a staged offset out of range writes nothing");
+}
+
 }   // namespace
 
 int main() {
@@ -348,6 +391,8 @@ int main() {
     corruptHostOffsets<rtt::BufferMode::skip, 13>("corrupt host offset, skip, any size");
     corruptHostOffsets<rtt::BufferMode::trim, 16>("corrupt host offset, trim, a power of two");
     corruptHostOffsets<rtt::BufferMode::trim, 13>("corrupt host offset, trim, any size");
+    staged<16>("stage, a power of two");
+    staged<13>("stage, any size");
     if(failures == 0) { std::puts("all checks passed"); }
     return failures == 0 ? 0 : 1;
 }
