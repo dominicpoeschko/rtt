@@ -20,7 +20,7 @@
 #include <vector>
 
 // the tests poke at raw storage and at the control block's bytes on purpose
-#if defined(__clang__)
+#ifdef __clang__
     #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 #endif
 
@@ -268,7 +268,7 @@ struct LayoutConfig {
     using DownChannelConfigs
       = rtt::make_ChannelConfigs_t<rtt::ChannelConfig<64, rtt::BufferMode::skip, Down0>,
                                    rtt::ChannelConfig<80, rtt::BufferMode::skip, Down1>>;
-    static constexpr auto ControlBlockId{rtt::DefaultControlBlockId};
+    static constexpr auto controlBlockId{rtt::defaultControlBlockId};
 };
 
 std::uint32_t word(void const* base,
@@ -303,7 +303,7 @@ void controlBlockLayout() {
     };
     for(std::size_t i = 0; i != expected.size(); ++i) {
         std::size_t const at = 24 + 24 * i;
-        // NOLINTNEXTLINE(performance-no-int-to-ptr): the name pointer as the J-Link sees it
+        // the name pointer as the J-Link sees it
         auto const* const name = reinterpret_cast<char const*>(std::uintptr_t{word(&block, at)});
         CHECK(std::string_view{name} == expected[i].name, "buffer i carries its own name");
         CHECK(word(&block, at + 4) == reinterpret_cast<std::uintptr_t>(expected[i].buffer),

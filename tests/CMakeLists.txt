@@ -28,26 +28,45 @@ if("${USE_STD_LIB}" STREQUAL "libc++" AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     set(CMAKE_REQUIRED_LINK_OPTIONS -m32 -stdlib=libc++ -fuse-ld=lld)
 endif()
 check_cxx_source_compiles("#include <thread>\nint main() { std::thread t{[]{}}; t.join(); }" RTT_HAS_M32)
+# ThreadSanitizer has no 32-bit x86 runtime (clang refuses the flag, gcc fails the link): such a build runs the native
+# tests only
+if("${USE_SANITIZER}" MATCHES "thread")
+    set(RTT_HAS_M32 FALSE)
+endif()
 unset(CMAKE_REQUIRED_FLAGS)
 unset(CMAKE_REQUIRED_LINK_OPTIONS)
 
+# rtt_add_host_executable(<name> [NATIVE] <sources>): -m32 unless NATIVE (the host's own pointer size)
 function(rtt_add_host_executable name)
-    add_executable(${name} ${ARGN})
+    cmake_parse_arguments(arg "NATIVE" "" "" ${ARGN})
+    add_executable(${name} ${arg_UNPARSED_ARGUMENTS})
     target_link_libraries(${name} PRIVATE rtt::rtt)
-    target_compile_features(${name} PRIVATE cxx_std_23)
+    target_compile_features(${name} PRIVATE cxx_std_26)
     target_add_default_build_options(${name} PRIVATE)
-    target_compile_options(${name} PRIVATE -m32 -Wall -Wextra -Wconversion -Wsign-conversion -Werror)
+    target_compile_options(${name} PRIVATE -Wall -Wextra -Wconversion -Wsign-conversion -Werror)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         # clang's "integer" group (cmake_helpers USE_EXTRA_SANITIZERS) flags the standard library's intended unsigned
         # wraparound, see the file
         target_compile_options(
             ${name} PRIVATE -fsanitize-ignorelist=${CMAKE_CURRENT_SOURCE_DIR}/stdlib_sanitizer_ignorelist.txt)
     endif()
-    target_link_options(${name} PRIVATE -m32)
+    if(NOT arg_NATIVE)
+        target_compile_options(${name} PRIVATE -m32)
+        target_link_options(${name} PRIVATE -m32)
+    endif()
 endfunction()
 
+# The offset hand-off against a thread playing the debug probe. Built for the host's own pointers (it uses no control
+# block layout), so it runs in every configuration - under ThreadSanitizer too, which has no 32-bit runtime.
+find_package(Threads REQUIRED)
+rtt_add_host_executable(rtt_test_probe_thread NATIVE probe_thread_tests.cpp)
+target_link_libraries(rtt_test_probe_thread PRIVATE Threads::Threads)
+add_test(NAME rtt_test_probe_thread COMMAND rtt_test_probe_thread)
+set_tests_properties(
+    rtt_test_probe_thread PROPERTIES ENVIRONMENT
+                                     "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1;TSAN_OPTIONS=halt_on_error=1")
+
 if(RTT_HAS_M32)
-    find_package(Threads REQUIRED)
     rtt_add_host_executable(rtt_test_ring ring_tests.cpp)
     target_link_libraries(rtt_test_ring PRIVATE Threads::Threads)
     add_test(NAME rtt_test_ring COMMAND rtt_test_ring)

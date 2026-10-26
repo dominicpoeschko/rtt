@@ -54,7 +54,9 @@ which does not get initialized.
 example:
 
 ```c++
-[[gnu::section(".noInit")]] static inline constinit typename RttType::Storage_t rttStorage;
+// .noInit.inline, not .noInit: gcc refuses a TU where this inline (COMDAT) member and a plain variable
+// share one named section; a linker rule *(.noInit*) collects both.
+[[gnu::section(".noInit.inline"), gnu::used]] static inline constinit typename RttType::Storage_t rttStorage;
 ```
 
 ## Tests

@@ -5,8 +5,10 @@
 using RttConfig = rtt::SingleModeUpOnlyEmptyNameConfig<rtt::BufferMode::skip, 512>;
 using RttType   = rtt::ControlBlock<RttConfig>;
 
-static inline constinit typename RttType::Storage_t storage{};
-static inline constinit RttType                     rttControlBlock{storage};
+namespace {
+constinit typename RttType::Storage_t storage{};
+constinit RttType                     rttControlBlock{storage};
+}   // namespace
 
 int main() {
     static constexpr std::string_view msg{"test\n"};

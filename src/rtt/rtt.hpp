@@ -36,31 +36,27 @@ namespace detail {
         constexpr bool operator()(std::uint32_t) const { return false; }
     };
 
-    template<BufferMode Mode, std::size_t BufferSize_, typename Name>
+    template<BufferMode Mode, std::size_t BufferSize, typename Name>
     struct Buffer {
     private:
-        static_assert(
-          sizeof(char const*) == 4 && sizeof(std::byte*) == 4,
-          "rtt only works on 32bit systems since memory layout is specified for 4byte pointers");
-
         struct Space {
             std::size_t contiguous;   // up to the buffer's end
             std::size_t total;
         };
 
         // free bytes to write at `pos`, or filled bytes to read there
-        template<bool write>
+        template<bool Write>
         static Space space(std::size_t const otherPos,
                            std::size_t const pos) {
             // the host's offset past the buffer (corrupt, or a probe reading garbage): touch nothing
             // rather than copy past the storage's end
-            if(otherPos >= BufferSize) { return {0U, 0U}; }
-            if constexpr(write) {
+            if(otherPos >= bufferSize) { return {0U, 0U}; }
+            if constexpr(Write) {
                 if(otherPos > pos) { return {otherPos - pos - 1U, otherPos - pos - 1U}; }
-                std::size_t const total = BufferSize - 1U - (pos - otherPos);
-                return {std::min(total, BufferSize - pos), total};
+                std::size_t const total = bufferSize - 1U - (pos - otherPos);
+                return {std::min(total, bufferSize - pos), total};
             } else {
-                if(pos > otherPos) { return {BufferSize - pos, BufferSize - pos + otherPos}; }
+                if(pos > otherPos) { return {bufferSize - pos, bufferSize - pos + otherPos}; }
                 return {otherPos - pos, otherPos - pos};
             }
         }
@@ -68,17 +64,22 @@ namespace detail {
         static std::uint32_t nextPos(std::uint32_t const pos,
                                      std::size_t const   numBytes) {
             // no division: % only where it is a mask (a power of two), a compare otherwise
-            if constexpr(std::has_single_bit(BufferSize)) {
-                return static_cast<std::uint32_t>((pos + numBytes) % BufferSize);
+            if constexpr(std::has_single_bit(bufferSize)) {
+                return static_cast<std::uint32_t>((pos + numBytes) % bufferSize);
             } else {
                 auto const newPos = static_cast<std::uint32_t>(pos + numBytes);
-                return newPos == BufferSize ? 0U : newPos;
+                return newPos == bufferSize ? 0U : newPos;
             }
         }
 
         // the data before the offset that publishes it: SEGGER_RTT.h puts a DMB there (RTT__DMB) on
         // the cores that may reorder memory accesses - ARMv7E-M, ARMv8-M baseline and mainline,
-        // ARMv7-A/R
+        // ARMv7-A/R. That is the implementations' rule, not the architecture's (DAI0321A 3.3 asks a
+        // DMB on every M profile): on the Cortex-M0, M0+, M3 and M4 "all use of DMB is redundant
+        // due to the inherent ordering of all loads and stores" (DAI0321A 3.5, md l.577 M3/M4,
+        // l.628 M0, l.671 M0+). The macros cannot tell the M4 from the M7 (both ARMv7E-M), so the
+        // M4 gets a DMB it does not need; ARMv7-M (the M3) and ARMv6-M get none. Its own asm, not
+        // Kvasir::Core::dmb(): rtt builds alone, below every Kvasir package.
         static void publishFence() {
 #if defined(__ARM_ARCH_7EM__) || defined(__ARM_ARCH_8M_BASE__) || defined(__ARM_ARCH_8M_MAIN__) \
   || defined(__ARM_ARCH_8_1M_MAIN__) || defined(__ARM_ARCH_7A__) || defined(__ARM_ARCH_7R__)
@@ -88,11 +89,48 @@ namespace detail {
 #endif
         }
 
+        // The offsets are shared with the debug probe, which reads and writes the target's RAM through the debug
+        // port while the core runs: a writer outside the C++ memory model. The probe's offset is read through a
+        // volatile reference (no cast): one full-width load each call, never folded or merged - what
+        // std::atomic_ref<std::uint32_t const volatile> (C++26, P3323) promises, which libc++ 23 does not have yet.
+        // An aligned word load is single-copy atomic on every Arm core (Armv6-M DDI0419E A3.5.1, Armv7-M DDI0403E.e
+        // A3.5.3), so on the target that volatile load is all P3323's relaxed load would be. Not a plain
+        // std::atomic_ref: nothing in the program stores the host's offset of an up buffer, and with LTO clang folded
+        // every relaxed atomic load of it to its initial value (a release image lost its whole control block); and
+        // gcc's __atomic_load_n gives each load a literal-pool address of its own (4 bytes a site). On the target the
+        // order is publishFence()'s; on a host the other side is a C++ thread (the tests' probe), and the same
+        // hand-off is an acquire load / release store, which ThreadSanitizer checks.
+    public:
+        // the other side's offset as it is now
+        [[gnu::always_inline]] static std::uint32_t
+        loadOffset(std::uint32_t const volatile& offset) {
+#ifdef __arm__
+            return offset;
+#else
+            return __atomic_load_n(std::addressof(offset), __ATOMIC_ACQUIRE);
+#endif
+        }
+
+    private:
+        // this side's offset, made visible after the data before it. On the target a plain store after the fence
+        // (only this side writes it and it reads it back itself, so the store is never dropped; an atomic store costs
+        // gcc a literal-pool address a site, as the load above); on a host the release store the tests' probe thread
+        // pairs with.
+        [[gnu::always_inline]] static void publishOffset(std::uint32_t&      offset,
+                                                         std::uint32_t const value) {
+            publishFence();
+#ifdef __arm__
+            offset = value;
+#else
+            std::atomic_ref<std::uint32_t>{offset}.store(value, std::memory_order_release);
+#endif
+        }
+
         // the number of elements of userBuffer moved (from its start). A skip-mode write that does
         // not fit asks keepWaiting(the host's offset) and tries again while it says yes. Publish:
         // ownPosition is the offset the other side reads (a fence before it moves); false for a
         // staged write, whose position is the writer's own until publish().
-        template<bool write,
+        template<bool Write,
                  typename T,
                  typename KeepWaiting = NeverWait,
                  bool Publish         = true>
@@ -105,12 +143,11 @@ namespace detail {
             std::uint32_t pos       = ownPosition;
 
             while(!remaining.empty()) {
-                std::uint32_t const other
-                  = *reinterpret_cast<std::uint32_t const volatile*>(std::addressof(otherPosition));
-                Space const free = space<write>(other, pos);
+                std::uint32_t const other = loadOffset(otherPosition);
+                Space const         free  = space<Write>(other, pos);
 
                 // skip: a write goes in whole or not at all; a read takes what is there
-                if constexpr(write && Mode == BufferMode::skip) {
+                if constexpr(Write && Mode == BufferMode::skip) {
                     if(free.total < remaining.size()) {
                         if(!keepWaiting(other)) { break; }
                         continue;
@@ -130,7 +167,7 @@ namespace detail {
                 while(piece != 0) {
                     auto* const ring
                       = std::next(buffer, static_cast<std::make_signed_t<std::size_t>>(pos));
-                    if constexpr(write) {
+                    if constexpr(Write) {
                         std::memcpy(ring, remaining.data(), piece);
                     } else {
                         std::memcpy(remaining.data(), ring, piece);
@@ -140,20 +177,30 @@ namespace detail {
                     left -= piece;
                     piece = left;
                 }
-                if constexpr(Publish) { publishFence(); }
-                ownPosition = pos;
+                if constexpr(Publish) {
+                    publishOffset(ownPosition, pos);
+                } else {
+                    ownPosition = pos;
+                }
             }
             return userBuffer.size() - remaining.size();
         }
 
+        // the name SEGGER's host reads as a C string: a Name's view ends in a NUL (a string literal, uc_log's
+        // BufferName storage) or is empty (EmptyName: no name, a null pointer)
+        static constexpr char const* cName() {
+            constexpr std::string_view name{Name{}};
+            return name.data();
+        }
+
     public:
-        static constexpr auto BufferSize = BufferSize_;
+        static constexpr auto bufferSize = BufferSize;
 
         static constexpr BufferControlBlock make(std::byte* const buffer) {
-            return {.name       = std::string_view{Name{}}.data(),
-                    .buffer     = buffer,
-                    .bufferSize = BufferSize,
-                    .mode       = Mode};
+            static_assert(sizeof(char const*) == 4 && sizeof(std::byte*) == 4,
+                          "rtt only works on 32bit systems since memory layout is specified for "
+                          "4byte pointers");
+            return {.name = cName(), .buffer = buffer, .bufferSize = bufferSize, .mode = Mode};
         }
 
         static std::span<std::byte const> write(BufferControlBlock&        block,
@@ -172,7 +219,7 @@ namespace detail {
                           std::span<std::byte const> bufferToWrite,
                           std::uint32_t&             staged,
                           KeepWaiting&&              keepWaiting = {}) {
-            if(staged >= BufferSize) { return false; }
+            if(staged >= bufferSize) { return false; }
             return transfer<true, std::byte const, KeepWaiting, false>(
                      block.buffer,
                      bufferToWrite,
@@ -184,17 +231,15 @@ namespace detail {
 
         static void publish(BufferControlBlock& block,
                             std::uint32_t const staged) {
-            publishFence();
-            block.writePosition = staged;
+            publishOffset(block.writePosition, staged);
         }
 
         // bytes written that the host has not read yet (0 for a host offset out of range)
         static std::size_t unread(BufferControlBlock const& block) {
-            std::size_t const host = *reinterpret_cast<std::uint32_t const volatile*>(
-              std::addressof(block.readPosition));
-            if(host >= BufferSize) { return 0U; }
+            std::size_t const host = loadOffset(block.readPosition);
+            if(host >= bufferSize) { return 0U; }
             std::size_t const own = block.writePosition;
-            return own >= host ? own - host : BufferSize - host + own;
+            return own >= host ? own - host : bufferSize - host + own;
         }
 
         static std::span<std::byte> read(BufferControlBlock&  block,
@@ -211,32 +256,32 @@ template<typename Config>
 struct ControlBlock {
 private:
     template<typename UpConfig, typename DownConfig>
-    struct Buffers_impl;
+    struct BuffersImpl;
 
     template<template<typename...> typename U,
              typename... Us,
              template<typename...> typename D,
              typename... Ds>
-    struct Buffers_impl<U<Us...>, D<Ds...>> {
-        using Types = std::tuple<detail::Buffer<Us::Mode, Us::Size, typename Us::Name>...,
-                                 detail::Buffer<Ds::Mode, Ds::Size, typename Ds::Name>...>;
-        static constexpr std::size_t UpSize{sizeof...(Us)};
-        static constexpr std::size_t DownSize{sizeof...(Ds)};
+    struct BuffersImpl<U<Us...>, D<Ds...>> {
+        using Types = std::tuple<detail::Buffer<Us::mode, Us::size, typename Us::Name>...,
+                                 detail::Buffer<Ds::mode, Ds::size, typename Ds::Name>...>;
+        static constexpr std::size_t upSize{sizeof...(Us)};
+        static constexpr std::size_t downSize{sizeof...(Ds)};
     };
 
     using Buffers
-      = Buffers_impl<typename Config::UpChannelConfigs, typename Config::DownChannelConfigs>;
+      = BuffersImpl<typename Config::UpChannelConfigs, typename Config::DownChannelConfigs>;
 
     template<std::size_t I>
     using BufferAt = std::tuple_element_t<I, typename Buffers::Types>;
 
-    static constexpr std::size_t NumBuffers = Buffers::UpSize + Buffers::DownSize;
+    static constexpr std::size_t numBuffers = Buffers::upSize + Buffers::downSize;
 
     // std::array<T, 0> is not empty in libc++
     struct NoBuffers {};
 
     using BufferControlBlocks = std::
-      conditional_t<NumBuffers == 0, NoBuffers, std::array<detail::BufferControlBlock, NumBuffers>>;
+      conditional_t<numBuffers == 0, NoBuffers, std::array<detail::BufferControlBlock, numBuffers>>;
 
     template<typename UpConfig, typename DownConfig>
     struct Storage;
@@ -247,7 +292,7 @@ private:
              typename... Ds>
     struct Storage<U<Us...>, D<Ds...>> {
         using Type
-          = std::tuple<std::array<std::byte, Us::Size>..., std::array<std::byte, Ds::Size>...>;
+          = std::tuple<std::array<std::byte, Us::size>..., std::array<std::byte, Ds::size>...>;
     };
 
     template<typename UserStorage,
@@ -258,7 +303,7 @@ private:
         using std::get;
         using std::size;
         static_assert(
-          ((size(std::remove_cvref_t<decltype(get<Is>(buffers))>{}) == BufferAt<Is>::BufferSize)
+          ((size(std::remove_cvref_t<decltype(get<Is>(buffers))>{}) == BufferAt<Is>::bufferSize)
            && ...),
           "buffer size does not match");
         return {BufferAt<Is>::make(data(get<Is>(buffers)))...};
@@ -276,20 +321,20 @@ public:
 
     template<typename UserStorage>
     constexpr explicit ControlBlock(UserStorage& buffers)
-      : controlBlockId{Config::ControlBlockId}
-      , numUpBuffers{Buffers::UpSize}
-      , numDownBuffers{Buffers::DownSize}
+      : controlBlockId{Config::controlBlockId}
+      , numUpBuffers{Buffers::upSize}
+      , numDownBuffers{Buffers::downSize}
       , bufferControlBlocks{bufferControlBlocksInit(buffers,
-                                                    std::make_index_sequence<NumBuffers>{})} {
+                                                    std::make_index_sequence<numBuffers>{})} {
         static_assert(sizeof(detail::BufferControlBlock) == 24, "layout messed up...");
-        static_assert(sizeof(ControlBlock) == 24 + NumBuffers * 24, "layout messed up...");
+        static_assert(sizeof(ControlBlock) == 24 + numBuffers * 24, "layout messed up...");
     }
 
     template<std::size_t                   BufferNumber,
              std::ranges::contiguous_range InputRange>
         requires std::is_trivially_copyable_v<std::ranges::range_value_t<InputRange>>
     std::span<std::byte const> write(InputRange const& bufferToWrite) {
-        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
+        static_assert(Buffers::upSize > BufferNumber, "BufferNumber incorrect");
         return BufferAt<BufferNumber>::write(std::get<BufferNumber>(bufferControlBlocks),
                                              std::as_bytes(std::span{bufferToWrite}));
     }
@@ -300,7 +345,7 @@ public:
     bool stage(std::span<std::byte const> bufferToWrite,
                std::uint32_t&             staged,
                KeepWaiting&&              keepWaiting = {}) {
-        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
+        static_assert(Buffers::upSize > BufferNumber, "BufferNumber incorrect");
         return BufferAt<BufferNumber>::stage(std::get<BufferNumber>(bufferControlBlocks),
                                              bufferToWrite,
                                              staged,
@@ -309,40 +354,40 @@ public:
 
     template<std::size_t BufferNumber>
     void publish(std::uint32_t staged) {
-        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
+        static_assert(Buffers::upSize > BufferNumber, "BufferNumber incorrect");
         BufferAt<BufferNumber>::publish(std::get<BufferNumber>(bufferControlBlocks), staged);
     }
 
     // the published write offset of up buffer BufferNumber (where a staged record starts)
     template<std::size_t BufferNumber>
-    std::uint32_t writeOffset() const {
-        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
+    [[nodiscard]] std::uint32_t writeOffset() const {
+        static_assert(Buffers::upSize > BufferNumber, "BufferNumber incorrect");
         return std::get<BufferNumber>(bufferControlBlocks).writePosition;
     }
 
     // bytes of up buffer BufferNumber the host has not read yet
     template<std::size_t BufferNumber>
-    std::size_t unread() const {
-        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
+    [[nodiscard]] std::size_t unread() const {
+        static_assert(Buffers::upSize > BufferNumber, "BufferNumber incorrect");
         return BufferAt<BufferNumber>::unread(std::get<BufferNumber>(bufferControlBlocks));
     }
 
     // the host's read offset of up buffer BufferNumber, as it is now
     template<std::size_t BufferNumber>
-    std::uint32_t hostOffset() const {
-        static_assert(Buffers::UpSize > BufferNumber, "BufferNumber incorrect");
-        return *reinterpret_cast<std::uint32_t const volatile*>(
-          std::addressof(std::get<BufferNumber>(bufferControlBlocks).readPosition));
+    [[nodiscard]] std::uint32_t hostOffset() const {
+        static_assert(Buffers::upSize > BufferNumber, "BufferNumber incorrect");
+        return BufferAt<BufferNumber>::loadOffset(
+          std::get<BufferNumber>(bufferControlBlocks).readPosition);
     }
 
     template<std::size_t                   BufferNumber,
              std::ranges::contiguous_range OutputRange>
         requires std::is_trivially_copyable_v<std::ranges::range_value_t<OutputRange>>
     std::span<std::byte> read(OutputRange&& bufferToReadTo) {
-        static_assert(Buffers::DownSize > BufferNumber, "BufferNumber incorrect");
-        constexpr std::size_t Index = BufferNumber + Buffers::UpSize;
-        return BufferAt<Index>::read(
-          std::get<Index>(bufferControlBlocks),
+        static_assert(Buffers::downSize > BufferNumber, "BufferNumber incorrect");
+        constexpr std::size_t index = BufferNumber + Buffers::upSize;
+        return BufferAt<index>::read(
+          std::get<index>(bufferControlBlocks),
           std::as_writable_bytes(std::span{std::forward<OutputRange>(bufferToReadTo)}));
     }
 };
@@ -351,14 +396,16 @@ struct EmptyName {
     constexpr operator std::string_view() const { return {}; }
 };
 
-template<std::size_t Size_, BufferMode Mode_ = rtt::BufferMode::block, typename Name_ = EmptyName>
+template<std::size_t Size,
+         BufferMode  Mode     = rtt::BufferMode::block,
+         typename ChannelName = EmptyName>
 struct ChannelConfig {
-    static constexpr std::size_t Size = Size_;
-    static constexpr BufferMode  Mode = Mode_;
-    using Name                        = Name_;
+    static constexpr std::size_t size = Size;
+    static constexpr BufferMode  mode = Mode;
+    using Name                        = ChannelName;
 };
 
-static constexpr std::array<char, 16> DefaultControlBlockId{
+static constexpr std::array<char, 16> defaultControlBlockId{
   {'S', 'E', 'G', 'G', 'E', 'R', ' ', 'R', 'T', 'T', 0, 0, 0, 0, 0, 0}
 };
 
@@ -373,6 +420,6 @@ struct SingleModeUpOnlyEmptyNameConfig {
 
     using DownChannelConfigs = EmptyChannelConfig;
 
-    static constexpr auto ControlBlockId{DefaultControlBlockId};
+    static constexpr auto controlBlockId{defaultControlBlockId};
 };
 }   // namespace rtt

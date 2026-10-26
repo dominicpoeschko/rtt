@@ -13,14 +13,16 @@ struct RttConfig {
 
     using DownChannelConfigs = rtt::EmptyChannelConfig;
 
-    static constexpr auto ControlBlockId{rtt::DefaultControlBlockId};
+    static constexpr auto controlBlockId{rtt::defaultControlBlockId};
 };
 
 using RttType = rtt::ControlBlock<RttConfig>;
 
-static inline constinit typename RttType::Storage_t storage{};
+namespace {
+constinit typename RttType::Storage_t storage{};
 
-static inline constinit RttType rttControlBlock{storage};
+constinit RttType rttControlBlock{storage};
+}   // namespace
 
 int main() {
     static constexpr std::string_view msg{"test\n"};

@@ -1,13 +1,14 @@
 # cmake -DCOMPILER=gcc|clang -DARM_GXX=... [-DCLANGXX=...] -DCPU=cortex-m33 -DEXPECT_DMB=0|1 -DINCLUDE=<rtt/src>
 # -DSOURCE=<file.cpp> -P arm_check.cmake
 #
-# Compiles SOURCE to assembly for CPU with warnings as errors and checks that it has a dmb exactly when EXPECT_DMB says.
-# clang uses arm-none-eabi-gcc's newlib and libstdc++ (the multilib directories for this very CPU).
+# Compiles SOURCE to assembly for CPU with warnings as errors and checks that it has a dmb exactly when EXPECT_DMB says,
+# and that no offset access is a call into a libatomic. clang uses arm-none-eabi-gcc's newlib and libstdc++ (the
+# multilib directories for this very CPU).
 
 set(flags
     -mcpu=${CPU}
     -mthumb
-    -std=c++23
+    -std=c++26
     -O2
     -fno-exceptions
     -Wall
@@ -50,6 +51,11 @@ execute_process(
     RESULT_VARIABLE result)
 if(NOT result EQUAL 0 OR errors)
     message(FATAL_ERROR "${COMPILER} ${CPU}: compile failed or warned (${result}):\n${errors}")
+endif()
+
+# the offsets are single loads and stores, never a call into a libatomic
+if(asm MATCHES "__atomic_|__sync_")
+    message(FATAL_ERROR "${COMPILER} ${CPU}: an offset access calls a libatomic entry point")
 endif()
 
 string(REGEX MATCHALL "[ \t]dmb" dmbs "${asm}")
