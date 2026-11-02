@@ -35,13 +35,13 @@ int failures = 0;
     } while(0)
 
 template<rtt::BufferMode Mode, std::size_t Size>
-using BufferT = rtt::detail::Buffer<Mode, Size, rtt::EmptyName>;
+using BufferT = rtt::Detail::Buffer<Mode, Size, rtt::EmptyName>;
 
 // a buffer control block as the target keeps it, without the 4-byte-pointer layout of a real control block
 template<rtt::BufferMode Mode, std::size_t Size>
 struct Ring {
     std::unique_ptr<std::byte[]>    storage = std::make_unique<std::byte[]>(Size);
-    rtt::detail::BufferControlBlock block{.name       = "probe",
+    rtt::Detail::BufferControlBlock block{.name       = "probe",
                                           .buffer     = storage.get(),
                                           .bufferSize = Size,
                                           .mode       = Mode};
@@ -53,7 +53,7 @@ std::byte byteOf(std::size_t n) { return std::byte{static_cast<std::uint8_t>(n *
 // byte the target published, calls onByte(byte) for each, and stops after `total` bytes.
 template<std::size_t Size,
          typename OnByte>
-void probeDrains(rtt::detail::BufferControlBlock& block,
+void probeDrains(rtt::Detail::BufferControlBlock& block,
                  std::size_t const                total,
                  OnByte&&                         onByte) {
     std::atomic_ref<std::uint32_t> const wrOff{block.writePosition};
@@ -80,12 +80,12 @@ template<std::size_t Size>
 void upBlock(char const* what) {
     using Buffer                = BufferT<rtt::BufferMode::block, Size>;
     auto                  ring  = Ring<rtt::BufferMode::block, Size>{};
-    constexpr std::size_t Total = 100000;
+    constexpr std::size_t total = 100000;
     std::size_t           bad   = 0;
 
     std::thread probe{[&] {
         std::size_t expected = 0;
-        probeDrains<Size>(ring.block, Total, [&](std::byte b) {
+        probeDrains<Size>(ring.block, total, [&](std::byte b) {
             if(b != byteOf(expected++)) { ++bad; }
         });
     }};
@@ -94,8 +94,8 @@ void upBlock(char const* what) {
     std::uniform_int_distribution<std::size_t> length{1, 2 * Size};
     std::size_t                                next   = 0;
     bool                                       short_ = false;
-    for(std::size_t sent = 0; sent != Total;) {
-        std::vector<std::byte> chunk(std::min(length(random), Total - sent));
+    for(std::size_t sent = 0; sent != total;) {
+        std::vector<std::byte> chunk(std::min(length(random), total - sent));
         for(auto& b : chunk) { b = byteOf(next++); }
         if(!Buffer::write(ring.block, chunk).empty()) { short_ = true; }
         sent += chunk.size();
@@ -110,17 +110,17 @@ template<std::size_t Size>
 void upStaged(char const* what) {
     using Buffer                  = BufferT<rtt::BufferMode::skip, Size>;
     auto                  ring    = Ring<rtt::BufferMode::skip, Size>{};
-    constexpr std::size_t Records = 5000;
-    constexpr std::size_t Length  = 5;   // a length byte and four counter bytes
+    constexpr std::size_t records = 5000;
+    constexpr std::size_t length  = 5;   // a length byte and four counter bytes
     std::size_t           bad     = 0;
 
     std::thread probe{[&] {
         std::size_t index = 0;
         std::size_t at    = 0;
-        probeDrains<Size>(ring.block, Records * Length, [&](std::byte b) {
-            auto const want = at == 0 ? std::byte{Length} : byteOf(index * 4U + at);
+        probeDrains<Size>(ring.block, records * length, [&](std::byte b) {
+            auto const want = at == 0 ? std::byte{length} : byteOf(index * 4U + at);
             if(b != want) { ++bad; }
-            if(++at == Length) {
+            if(++at == length) {
                 at = 0;
                 ++index;
             }
@@ -128,9 +128,9 @@ void upStaged(char const* what) {
     }};
 
     std::uint32_t waits = 0;
-    for(std::size_t i = 0; i != Records; ++i) {
-        std::array<std::byte, Length> record{std::byte{Length}};
-        for(std::size_t k = 1; k != Length; ++k) { record[k] = byteOf(i * 4U + k); }
+    for(std::size_t i = 0; i != records; ++i) {
+        std::array<std::byte, length> record{std::byte{length}};
+        for(std::size_t k = 1; k != length; ++k) { record[k] = byteOf(i * 4U + k); }
         std::uint32_t staged = ring.block.writePosition;
         bool const    ok     = Buffer::stage(ring.block, record, staged, [&](std::uint32_t) {
             ++waits;
@@ -150,17 +150,17 @@ template<std::size_t Size>
 void drainPoll(char const* what) {
     using Buffer                = BufferT<rtt::BufferMode::skip, Size>;
     auto                  ring  = Ring<rtt::BufferMode::skip, Size>{};
-    constexpr std::size_t Total = Size - 1U;   // one full ring
+    constexpr std::size_t total = Size - 1U;   // one full ring
 
-    std::vector<std::byte> data(Total);
-    for(std::size_t i = 0; i != Total; ++i) { data[i] = byteOf(i); }
+    std::vector<std::byte> data(total);
+    for(std::size_t i = 0; i != total; ++i) { data[i] = byteOf(i); }
     CHECK(Buffer::write(ring.block, data).empty(), "a full ring's worth fits");
-    CHECK(Buffer::unread(ring.block) == Total, "all of it unread before the probe runs");
+    CHECK(Buffer::unread(ring.block) == total, "all of it unread before the probe runs");
 
     std::size_t bad = 0;
     std::thread probe{[&] {
         std::size_t expected = 0;
-        probeDrains<Size>(ring.block, Total, [&](std::byte b) {
+        probeDrains<Size>(ring.block, total, [&](std::byte b) {
             if(b != byteOf(expected++)) { ++bad; }
         });
     }};
@@ -177,21 +177,21 @@ template<std::size_t Size>
 void down(char const* what) {
     using Buffer                = BufferT<rtt::BufferMode::skip, Size>;
     auto                  ring  = Ring<rtt::BufferMode::skip, Size>{};
-    constexpr std::size_t Total = 100000;
+    constexpr std::size_t total = 100000;
 
     std::thread probe{[&] {
         std::atomic_ref<std::uint32_t> const wrOff{ring.block.writePosition};
         std::atomic_ref<std::uint32_t> const rdOff{ring.block.readPosition};
         std::uint32_t                        wr   = wrOff.load(std::memory_order_relaxed);
         std::size_t                          sent = 0;
-        while(sent != Total) {
+        while(sent != total) {
             std::uint32_t const rd   = rdOff.load(std::memory_order_acquire);
             std::size_t const   free = (rd + Size - wr - 1U) % Size;
             if(free == 0) {
                 std::this_thread::yield();
                 continue;
             }
-            for(std::size_t k = 0; k != free && sent != Total; ++k) {
+            for(std::size_t k = 0; k != free && sent != total; ++k) {
                 ring.block.buffer[wr] = byteOf(sent++);
                 wr                    = static_cast<std::uint32_t>((wr + 1U) % Size);
             }
@@ -202,7 +202,7 @@ void down(char const* what) {
     std::size_t                 got = 0;
     std::size_t                 bad = 0;
     std::array<std::byte, Size> in{};
-    while(got != Total) {
+    while(got != total) {
         auto const n = Buffer::read(ring.block, in);
         for(auto const b : n) {
             if(b != byteOf(got++)) { ++bad; }

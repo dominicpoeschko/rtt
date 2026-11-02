@@ -20,7 +20,7 @@ namespace rtt {
 //values defined by rtt specification
 enum class BufferMode : std::uint32_t { skip = 0, trim = 1, block = 2 };
 
-namespace detail {
+namespace Detail {
     //memory layout demanded by rtt specification
     struct BufferControlBlock {
         char const* const   name{};
@@ -250,7 +250,7 @@ namespace detail {
                                                         block.readPosition));
         }
     };
-}   // namespace detail
+}   // namespace Detail
 
 template<typename Config>
 struct ControlBlock {
@@ -263,8 +263,8 @@ private:
              template<typename...> typename D,
              typename... Ds>
     struct BuffersImpl<U<Us...>, D<Ds...>> {
-        using Types = std::tuple<detail::Buffer<Us::mode, Us::size, typename Us::Name>...,
-                                 detail::Buffer<Ds::mode, Ds::size, typename Ds::Name>...>;
+        using Types = std::tuple<Detail::Buffer<Us::mode, Us::size, typename Us::Name>...,
+                                 Detail::Buffer<Ds::mode, Ds::size, typename Ds::Name>...>;
         static constexpr std::size_t upSize{sizeof...(Us)};
         static constexpr std::size_t downSize{sizeof...(Ds)};
     };
@@ -281,7 +281,7 @@ private:
     struct NoBuffers {};
 
     using BufferControlBlocks = std::
-      conditional_t<numBuffers == 0, NoBuffers, std::array<detail::BufferControlBlock, numBuffers>>;
+      conditional_t<numBuffers == 0, NoBuffers, std::array<Detail::BufferControlBlock, numBuffers>>;
 
     template<typename UpConfig, typename DownConfig>
     struct Storage;
@@ -326,7 +326,7 @@ public:
       , numDownBuffers{Buffers::downSize}
       , bufferControlBlocks{bufferControlBlocksInit(buffers,
                                                     std::make_index_sequence<numBuffers>{})} {
-        static_assert(sizeof(detail::BufferControlBlock) == 24, "layout messed up...");
+        static_assert(sizeof(Detail::BufferControlBlock) == 24, "layout messed up...");
         static_assert(sizeof(ControlBlock) == 24 + numBuffers * 24, "layout messed up...");
     }
 
@@ -341,7 +341,7 @@ public:
 
     // A staged write to up buffer BufferNumber (a skip-mode buffer): see detail::Buffer::stage.
     template<std::size_t BufferNumber,
-             typename KeepWaiting = detail::NeverWait>
+             typename KeepWaiting = Detail::NeverWait>
     bool stage(std::span<std::byte const> bufferToWrite,
                std::uint32_t&             staged,
                KeepWaiting&&              keepWaiting = {}) {

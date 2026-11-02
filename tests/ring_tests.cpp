@@ -1,4 +1,4 @@
-// rtt::detail::Buffer as a pipe, checked against a deque; its edges; block mode against a reader
+// rtt::Detail::Buffer as a pipe, checked against a deque; its edges; block mode against a reader
 // thread; offsets a host may have corrupted; and the control block's layout as the J-Link reads it.
 // Built -m32: rtt only compiles for 4-byte pointers.
 #include "rtt/rtt.hpp"
@@ -41,13 +41,13 @@ struct Name {
 };
 
 template<rtt::BufferMode Mode, std::size_t Size>
-using BufferT = rtt::detail::Buffer<Mode, Size, Name>;
+using BufferT = rtt::Detail::Buffer<Mode, Size, Name>;
 
 // Storage on the heap and exactly Size bytes long, so ASan sees a byte past its end.
 template<rtt::BufferMode Mode, std::size_t Size>
 struct Ring {
     std::unique_ptr<std::byte[]>    storage = std::make_unique<std::byte[]>(Size);
-    rtt::detail::BufferControlBlock block   = BufferT<Mode, Size>::make(storage.get());
+    rtt::Detail::BufferControlBlock block   = BufferT<Mode, Size>::make(storage.get());
 };
 
 // the byte a running counter stands for
@@ -167,7 +167,7 @@ template<std::size_t Size>
 void blockAgainstReader(char const* what) {
     using Buffer                      = BufferT<rtt::BufferMode::block, Size>;
     auto                  ring        = Ring<rtt::BufferMode::block, Size>{};
-    constexpr std::size_t Total       = 200000;
+    constexpr std::size_t total       = 200000;
     std::atomic<bool>     ok          = true;
     std::atomic<bool>     writerShort = false;
 
@@ -176,7 +176,7 @@ void blockAgainstReader(char const* what) {
         std::atomic_ref<std::uint32_t> const rdOff{ring.block.readPosition};
         std::size_t                          expected = 0;
         std::size_t                          got      = 0;
-        while(got != Total) {
+        while(got != total) {
             std::uint32_t const wr = wrOff.load(std::memory_order_acquire);
             std::uint32_t       rd = rdOff.load(std::memory_order_relaxed);
             while(rd != wr) {
@@ -192,8 +192,8 @@ void blockAgainstReader(char const* what) {
     std::mt19937                               random{Size};
     std::uniform_int_distribution<std::size_t> length{1, 3 * Size};
     std::size_t                                next = 0;
-    for(std::size_t sent = 0; sent != Total;) {
-        std::vector<std::byte> chunk(std::min(length(random), Total - sent));
+    for(std::size_t sent = 0; sent != total;) {
+        std::vector<std::byte> chunk(std::min(length(random), total - sent));
         for(auto& b : chunk) { b = byteOf(next++); }
         if(!Buffer::write(ring.block, chunk).empty()) { writerShort = true; }
         sent += chunk.size();
