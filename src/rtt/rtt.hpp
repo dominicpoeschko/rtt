@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -380,9 +381,16 @@ public:
           std::get<BufferNumber>(bufferControlBlocks).readPosition);
     }
 
+    // Into bytes only: the ring's content is copied into the range as it is, and that gives a byte its value but
+    // no other object ([basic.types.general]).
     template<std::size_t                   BufferNumber,
              std::ranges::contiguous_range OutputRange>
-        requires std::is_trivially_copyable_v<std::ranges::range_value_t<OutputRange>>
+        requires std::same_as<std::ranges::range_value_t<OutputRange>,
+                              std::byte>
+              || std::same_as<std::ranges::range_value_t<OutputRange>,
+                              char>
+              || std::same_as<std::ranges::range_value_t<OutputRange>,
+                              unsigned char>
     std::span<std::byte> read(OutputRange&& bufferToReadTo) {
         static_assert(Buffers::downSize > BufferNumber, "BufferNumber incorrect");
         constexpr std::size_t index = BufferNumber + Buffers::upSize;
